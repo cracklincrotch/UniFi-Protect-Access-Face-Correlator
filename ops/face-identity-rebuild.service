@@ -1,0 +1,7 @@
+[Unit]
+Description=Rebuild Protect face-matcher identity references (workaround 7.1.x clear-on-boot)
+After=ai-feature-console.service postgresql@14-protect.service
+Wants=ai-feature-console.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rebuild-face-identities.sh

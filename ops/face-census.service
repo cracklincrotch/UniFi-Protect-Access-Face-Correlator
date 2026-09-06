@@ -1,0 +1,5 @@
+[Unit]
+Description=Census of Protect face stores (drop detection)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/face-census.sh

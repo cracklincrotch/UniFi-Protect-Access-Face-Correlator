@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
-"""Periodic face auto-labeller (mm.pc). Two sources:
-  1. Access badge correlation  (ground truth, high yield)
-  2. Embedding matcher         (for faces badges can't reach)
-Applies both, logs undo, Pushovers a summary."""
-import asyncio, json, subprocess, sys, datetime, os, shlex
-from collections import defaultdict
+"""Periodic face auto-labeller. Two sources:
+  1. Access badge correlation  (ground truth, high yield)   -> badge_correlate.py
+  2. Embedding matcher         (for faces badges can't reach) -> nightly_scan.py
+Runs both as local steps, applies the result to Protect through an admin
+session, appends an undo record per batch, and sends one Pushover summary
+(one line per person with the combined total).
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+Without --apply it is a dry run. Where it runs is configuration (see
+common.py): the analysis steps need the NVR's database, the apply step needs
+the Protect API, the summary needs Pushover credentials."""
+import asyncio, json, subprocess, sys, datetime, os
+from collections import defaultdict
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import common
 import access_protect_correlator as apc
 
-GUEST = "unvr.pc"
-LOG   = os.path.join(HERE, "face-auto-label.jsonl")
-DRY   = "--apply" not in sys.argv
-API   = "/proxy/protect/api/recognition/face/assign-group"
+LOG = common.STATE / "face-auto-label.jsonl"
+DRY = "--apply" not in sys.argv
+API = "/proxy/protect/api/recognition/face/assign-group"
 
-def guest(cmd, timeout=900):
-    return subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", GUEST, cmd],
-                          capture_output=True, text=True, timeout=timeout)
 
-def notify(msg, title, prio="0"):
-    subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", GUEST,
-                    "sudo /usr/local/sbin/face-match-notify.sh %s %s %s"
-                    % (shlex.quote(msg), shlex.quote(title), prio)],
-                   capture_output=True, text=True, timeout=90)
+def step(script, timeout=900):
+    """Run one analysis script with this interpreter, in this directory."""
+    try:
+        return subprocess.run([sys.executable, str(HERE / script)], cwd=str(HERE),
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess([script], 124, "", "%s exceeded %d s" % (script, timeout))
+
 
 def build_badge_job():
-    r = guest("sudo python3 /root/face-match/badge_correlate.py")
+    r = step("badge_correlate.py")
     if r.returncode != 0:
-        return None, "badge correlate failed: " + (r.stderr or r.stdout)[:200]
-    raw = guest("sudo cat /root/face-match/badge-proposals.json").stdout
-    d = json.loads(raw)
+        return None, "badge correlate failed: " + (r.stderr or r.stdout)[-300:]
+    d = json.load(open(common.STATE / "badge-proposals.json"))
     nm = d.get("namemap", {})
     by = defaultdict(list)
     for p in d.get("proposals", []):
@@ -39,19 +45,22 @@ def build_badge_job():
     return [{"to_group": g, "person": n, "objectIds": o, "source": "badge"}
             for (g, n), o in by.items()], None
 
+
 def build_embed_job():
-    r = guest("sudo python3 /root/face-match/nightly_scan.py")
+    r = step("nightly_scan.py")
     if r.returncode != 0:
-        return [], "embed scan failed"
-    d = json.loads(guest("sudo cat /root/face-match/job.json").stdout)
+        return [], "embed scan failed: " + (r.stderr or r.stdout)[-300:]
+    d = json.load(open(common.STATE / "job.json"))
     return [dict(j, source="embedding") for j in d.get("job", [])], None
 
+
 async def main():
-    started = datetime.datetime.now()
     badge, err1 = build_badge_job()
     if badge is None:
-        notify(err1, "Face labeller error", "1"); print(err1); return
+        common.notify(err1, "Face labeller error", "1"); print(err1); return
     embed, err2 = build_embed_job()
+    if err2:
+        print(err2)
     job = badge + embed
     nb = sum(len(j["objectIds"]) for j in badge)
     ne = sum(len(j["objectIds"]) for j in embed)
@@ -60,11 +69,12 @@ async def main():
         for j in job: print("  WOULD %-8s %-32s %2d" % (j["source"], j["person"], len(j["objectIds"])))
         return
     if not job:
-        notify("Nothing new to label this run.", "Face labeller: quiet", "-1"); return
+        common.notify("Nothing new to label this run." + (" (%s)" % err2 if err2 else ""),
+                      "Face labeller: quiet", "-1"); return
 
     c = apc._AdminClient()
     if not await c._ensure():
-        notify("Could not authenticate to Protect.", "Face labeller error", "1"); return
+        common.notify("Could not authenticate to Protect.", "Face labeller error", "1"); return
     ok = fail = faces = 0
     per_person = {}   # person -> faces labelled this run, summed across badge + embedding batches
     with open(LOG, "a") as log:
@@ -88,7 +98,8 @@ async def main():
              for person, n in sorted(per_person.items(), key=lambda kv: (-kv[1], kv[0]))]
     msg = ", ".join(lines)
     if fail: msg += " -- %d batch(es) FAILED." % fail
-    notify(msg, "Faces labelled: %d" % faces, "1" if fail else "0")
+    if err2: msg += " -- " + err2
+    common.notify(msg, "Faces labelled: %d" % faces, "1" if fail else "0")
     print("applied %d batches, %d faces, %d failed" % (ok, faces, fail))
 
 asyncio.run(main())

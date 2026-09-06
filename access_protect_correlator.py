@@ -60,13 +60,7 @@ import aiohttp
 # integration key -- reads only) and PROTECT_USER / PROTECT_PASS (an admin account
 # with write scope: the private recognition API and the assign-group WRITE
 # used by --teach-write need a logged-in session, not the key).
-_SECRETS = Path(__file__).with_name("secrets.env")
-if _SECRETS.is_file():
-    for _line in _SECRETS.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+import common  # loads correlator.env + secrets.env into the environment; real env vars win
 
 UNVR_HOST  = os.environ.get("PROTECT_HOST", "unvr.pc")
 API_KEY    = os.environ.get("PROTECT_API_KEY", "")
@@ -98,7 +92,7 @@ DOOR_CAMERA_MAP: Dict[str, str] = {
 }
 
 # Directory where correlation records and images are written.
-OUTPUT_DIR = Path("./correlations")
+OUTPUT_DIR = common.STATE / "correlations"
 
 # Set to True via --dry-run; controls whether Protect is contacted at all.
 DRY_RUN: bool = False

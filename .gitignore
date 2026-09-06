@@ -1,7 +1,12 @@
-# credentials -- loaded by access_protect_correlator.py; commit secrets.env.example instead
+# credentials and local configuration -- commit the .example files instead
 secrets.env
-# run data: correlation dumps, applied-label logs, script logs (tenant PII)
+correlator.env
+# run state: proposals, jobs, undo logs, operator overrides, correlation dumps (tenant data)
+state/
 correlations/
+/*.json
+*.conf
+.env
 *.jsonl
 *.log
 # python / editor / backups
