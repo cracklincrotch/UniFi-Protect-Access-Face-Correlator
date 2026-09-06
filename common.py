@@ -17,10 +17,13 @@ Everything that depends on WHERE the code runs is configuration, not code:
     notify() prints to stderr instead of failing.
 """
 import glob
+import json
 import os
+import ssl
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -94,3 +97,70 @@ def notify(msg, title="Face matcher", prio="0"):
             timeout=20).read()
     except Exception as exc:  # a failed notification must not fail the run
         sys.stderr.write("notify failed: %s\n" % exc)
+
+
+class ProtectSession:
+    """Admin session for Protect's private API, standard library only.
+
+    POST /api/auth/login yields a TOKEN cookie and an X-CSRF-Token; both are
+    replayed EXPLICITLY on every request. Deliberately no cookie jar: jars
+    differ between library versions (on the NVR, aiohttp 3.7's jar dropped
+    the session, the client re-authenticated per request, and UniFi OS
+    rate-limited the account -- "AUTHENTICATION_FAILED_LIMIT_REACHED").
+    Re-authenticates at most once per call for the same reason."""
+
+    def __init__(self, host=None, user=None, password=None):
+        self.host = host or os.environ.get("PROTECT_HOST", "unvr.pc")
+        self.user = user or os.environ.get("PROTECT_USER", "")
+        self.password = password or os.environ.get("PROTECT_PASS", "")
+        self.token = self.csrf = None
+        self._ctx = ssl.create_default_context()          # self-signed console certificate
+        self._ctx.check_hostname = False
+        self._ctx.verify_mode = ssl.CERT_NONE
+
+    def _request(self, method, path, body=None, timeout=30):
+        data = json.dumps(body).encode() if body is not None else None
+        h = {"Accept": "application/json"}
+        if data is not None:
+            h["Content-Type"] = "application/json"
+        if self.csrf:
+            h["X-CSRF-Token"] = self.csrf
+        if self.token:
+            h["Cookie"] = "TOKEN=" + self.token
+        req = urllib.request.Request("https://%s%s" % (self.host, path), data=data, method=method, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
+                return r.status, r.headers, r.read().decode(errors="replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read().decode(errors="replace")
+
+    def login(self):
+        if not (self.user and self.password):
+            sys.stderr.write("protect: PROTECT_USER / PROTECT_PASS not set\n")
+            return False
+        st, hdr, body = self._request("POST", "/api/auth/login",
+                                      {"username": self.user, "password": self.password})
+        if st not in (200, 201):
+            sys.stderr.write("protect login failed: HTTP %s %s\n" % (st, body[:120].replace("\n", " ")))
+            return False
+        self.csrf = hdr.get("X-Updated-Csrf-Token") or hdr.get("X-CSRF-Token")
+        self.token = None
+        for sc in hdr.get_all("Set-Cookie") or []:
+            name, _, value = sc.split(";", 1)[0].partition("=")
+            if name.strip() == "TOKEN":
+                self.token = value.strip()
+        if not (self.csrf and self.token):
+            sys.stderr.write("protect login: no CSRF token or TOKEN cookie in the response\n")
+        return bool(self.csrf and self.token)
+
+    def post(self, path, body):
+        """Returns (status, text), or None if no session could be established."""
+        if self.token is None and not self.login():
+            return None
+        st, _, text = self._request("POST", path, body)
+        if st in (401, 403):
+            self.token = None
+            if not self.login():
+                return None
+            st, _, text = self._request("POST", path, body)
+        return st, text

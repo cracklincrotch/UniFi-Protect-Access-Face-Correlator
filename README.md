@@ -58,17 +58,32 @@ door → camera pairings; keys starting with `_` are parked), `rejected.json`
 (detection ids never to propose), the generated `badge-proposals.json` and
 `job.json`, and the undo log.
 
-## Running it on the NVR
+## Running it on the NVR (real hardware or the VM)
+
+The scheduled job uses only the Python standard library, so nothing has to be
+installed on the console. Keep everything under `/data`: on a UniFi OS console
+a firmware update replaces the root filesystem, and `/data` is what survives.
 
 ```
-apt-get install --no-install-recommends git python3-aiohttp
-git clone https://github.com/cracklincrotch/UniFi-Protect-Access-Face-Correlator /opt/face-correlator
-cd /opt/face-correlator && cp secrets.env.example secrets.env && chmod 600 secrets.env   # fill in
+mkdir -p /data/face-correlator && cd /data/face-correlator
+curl -sL https://github.com/cracklincrotch/UniFi-Protect-Access-Face-Correlator/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1
+cp secrets.env.example secrets.env && chmod 600 secrets.env     # fill in
 mkdir -p state && chmod 700 state   # put namemap-overrides.json / vicinity_cameras.json / rejected.json INTO state/ if you have them
 python3 face_auto_label.py          # dry run
-cp ops/face-auto-label.* /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now face-auto-label.timer
+ops/install.sh                      # writes the two unit files, enables the timer
 ```
 
-Same recipe for the census timer in `ops/`. The identity-rebuild timer is
-shipped but intentionally not enabled: Protect 7.2 keeps that reference table
-empty by design, so the 7.1-era workaround is parked until it is needed again.
+**After every firmware / UniFi OS update, run `ops/install.sh` again.** That
+is the only piece an update removes (the unit files live on the root
+filesystem). There is no supported persistent boot hook on stock UniFi OS; if
+you use the community `udm-boot` package, a one-line script in
+`/data/on_boot.d/` calling `ops/install.sh` closes the gap, but whether that
+package itself survives a given update is not something this README can
+promise.
+
+The census timer in `ops/` installs the same way (it is monitoring, optional).
+The identity-rebuild timer is shipped but intentionally not enabled: Protect
+7.2 keeps that reference table empty by design, so the 7.1-era workaround is
+parked until it is needed again. `access_protect_correlator.py`, the live
+correlator/daemon, is the one piece that needs `aiohttp` (WebSockets); the
+scheduled job does not import it.

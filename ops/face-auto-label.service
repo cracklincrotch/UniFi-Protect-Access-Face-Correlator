@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/face-correlator
-ExecStart=/usr/bin/python3 /opt/face-correlator/face_auto_label.py --apply
+WorkingDirectory=/data/face-correlator
+ExecStart=/usr/bin/python3 /data/face-correlator/face_auto_label.py --apply
 UMask=0077
 TimeoutStartSec=45min
