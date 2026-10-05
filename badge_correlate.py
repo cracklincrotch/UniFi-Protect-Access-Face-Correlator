@@ -2,6 +2,8 @@
 """Correlate unnamed Protect face detections with Access badge events.
 Rule: unique named badge within +/-3s, camera associated with that door,
 and exactly ONE face detected in the window (no tailgating ambiguity).
+The badge must also come from a credential the holder can only present in
+person (PRESENT_AT_READER); a remote buzz-in names someone who is elsewhere.
 
 Reads Protect and the Access event log through common.psql(); reads the
 operator overrides from and writes badge-proposals.json to the state
@@ -12,6 +14,18 @@ from collections import defaultdict, Counter
 from common import psql, STATE, PROTECT_DB, ACCESS_LOG_DB, PROTECT_DB_PORT, ACCESS_LOG_DB_PORT
 
 WIN = 3000
+
+# 2026-09-30: only these credential providers put the NAMED person physically AT the
+# reader.  A remote buzz-in (REMOTE_THROUGH_UAH_USER, REMOTE_THROUGH_UAH) names whoever
+# pressed the button somewhere else, so the one face in frame is GUARANTEED not to be
+# theirs.  That is how a visitor's face was labelled with a tenant's name on 09-01,
+# 09-07, 09-19 and twice on 09-30: the "exactly one unidentified face" guard below
+# cannot catch it, because on a buzz-in that guard passes precisely when it should fail.
+# MOBILE_BUTTON is a BLE proximity unlock (owner-confirmed 2026-09-30), so it is kept.  Unknown or new
+# providers are rejected rather than accepted: fail closed, because every wrong name here
+# is written into a real person's biometric record.
+PRESENT_AT_READER = ("FACE", "NFC", "PIN_CODE", "MOBILE_TAP", "MOBILE_BUTTON")
+_PRESENT_SQL = ",".join("'%s'" % p for p in PRESENT_AT_READER)
 
 
 def copy(port, db, sql):
@@ -30,6 +44,7 @@ for l in copy(ACCESS_LOG_DB_PORT, ACCESS_LOG_DB,
     "SELECT published, source->'actor'->>'display_name', COALESCE(source->'target'->0->>'display_name','?') "
     "FROM json_systemlog WHERE event_type='access.door.unlock' "
     "AND source->'actor'->>'display_name' IS NOT NULL AND source->'actor'->>'display_name' NOT IN ('N/A','') "
+    "AND source->'authentication'->>'credential_provider' IN (" + _PRESENT_SQL + ") "
     "AND published > 0").split('\n'):
     p = l.split('\t')
     if len(p) == 3 and p[1]:
